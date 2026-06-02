@@ -2,9 +2,9 @@ import re
 from src.parser import parse_file
 
 _RSSI_VAL_RE = re.compile(r'RSSI:\s*(-?\d+)|Rssi\((-?\d+)\)')
-_SEQ_NUM_RE = re.compile(r'seq_num=(\d+)')
 _RSSI_LEVEL_MAP = {'EXCELLENT': 0, 'GOOD': 1, 'MARGINAL': 2, 'BAD': 3, 'POOR': 3}
 _RSSI_LEVEL_RE = re.compile(r'rssiLevel\((\w+)\)|RSSI:\s*-?\d+\s+\((\w+)\)')
+_LEVEL_NUM_RE = re.compile(r'Level(\d+)')
 
 _EVENT_PATTERNS = {
     'flag_rssi_update':  'WIFI_STA_RSSI_UPDATE_IND_ID',
@@ -15,6 +15,10 @@ _EVENT_PATTERNS = {
     'flag_deauth':       'Deauthent',
     'flag_assoc_fail':   'ASSOC_RESP',
     'flag_conn_fail':    'connection fail',
+    'flag_ps_cmd':       'PS Command',
+    'flag_wlan_irq':     'wlan_interrupt',
+    'flag_wifi_stuck':   'WifiChannel: stuck',
+    'flag_wifi_off':     'wifiOff',
 }
 
 
@@ -38,11 +42,18 @@ def extract_line_features(entry: dict, prev_elapsed_ms) -> dict:
         word = (m.group(1) or m.group(2) or '').upper()
         rssi_level = _RSSI_LEVEL_MAP.get(word, -1)
 
-    seq_num = -1
-    m = _SEQ_NUM_RE.search(msg)
-    if m:
-        seq_num = int(m.group(1))
+    level_str = entry.get('level', 'Unknown')
+    m_lvl = _LEVEL_NUM_RE.match(level_str)
+    if m_lvl:
+        level_num = int(m_lvl.group(1))
+    elif level_str == 'Error':
+        level_num = 10
+    elif level_str == 'Warning':
+        level_num = 9
+    else:
+        level_num = 0
 
+    component = entry.get('component', '').lower()
     flags = {k: int(pat.lower() in msg.lower()) for k, pat in _EVENT_PATTERNS.items()}
 
     delta_ms = elapsed - prev_elapsed_ms if prev_elapsed_ms is not None else 0
@@ -53,11 +64,11 @@ def extract_line_features(entry: dict, prev_elapsed_ms) -> dict:
         'rssi':            rssi_val if rssi_val is not None else 0,
         'has_rssi':        int(rssi_val is not None),
         'rssi_level':      rssi_level,
-        'seq_num':         seq_num,
+        'level_num':       level_num,
         'is_error':        int(entry.get('level') == 'Error'),
         'is_warning':      int(entry.get('level') == 'Warning'),
-        'is_ssplogger':    int('ssp' in entry.get('component', '').lower()),
-        'log_format':      entry.get('format', 1),
+        'is_networking':   int('networking' in component),
+        'is_sspwifi':      int('sspwifi' in component),
         **flags,
     }
 

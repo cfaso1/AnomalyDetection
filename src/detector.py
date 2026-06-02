@@ -16,6 +16,7 @@ _NOTABLE_PATTERNS = [
     'WIFI_STA_RSSI_UPDATE_IND_ID', 'MLAN_EVENT_ID_FW_BCN_SNR_LOW',
     'MLAN_EVENT_ID_FW_DATA_SNR_LOW', 'MLAN_EVENT_ID_DRV_DEFER_RX_WORK',
     'REMOTE_NDIS_KEEPALIVE_MSG', 'Deauthent', 'ASSOC_RESP', 'connection fail',
+    'PS Command', 'wlan_interrupt', 'WifiChannel: stuck', 'wifiOff',
 ]
 
 _SEGMENT_FEATURE_COLS = [
@@ -25,7 +26,8 @@ _SEGMENT_FEATURE_COLS = [
     'flag_rssi_update_rate', 'flag_bcn_snr_low_rate', 'flag_data_snr_low_rate',
     'flag_defer_rx_rate', 'flag_keepalive_rate',
     'flag_deauth_rate', 'flag_assoc_fail_rate', 'flag_conn_fail_rate',
-    'deauth_to_assoc_ratio', 'max_delta_t_ms',
+    'flag_ps_cmd_rate', 'flag_wlan_irq_rate', 'flag_wifi_stuck_rate', 'flag_wifi_off_rate',
+    'deauth_to_assoc_ratio', 'max_delta_t_ms', 'max_rssi_drop',
 ]
 
 

@@ -8,16 +8,17 @@ _CONFIG_PATH = Path(__file__).parent.parent / 'config.json'
 
 _FEATURE_COLS = [
     'elapsed_ms', 'delta_ms', 'rssi', 'has_rssi', 'rssi_level',
-    'seq_num', 'is_error', 'is_warning', 'is_ssplogger', 'log_format',
+    'level_num', 'is_error', 'is_warning', 'is_networking', 'is_sspwifi',
     'flag_rssi_update', 'flag_bcn_snr_low', 'flag_data_snr_low',
     'flag_defer_rx', 'flag_keepalive', 'flag_deauth', 'flag_assoc_fail',
-    'flag_conn_fail',
+    'flag_conn_fail', 'flag_ps_cmd', 'flag_wlan_irq', 'flag_wifi_stuck', 'flag_wifi_off',
 ]
 
 _FLAG_COLS = [
     'flag_rssi_update', 'flag_bcn_snr_low', 'flag_data_snr_low',
     'flag_defer_rx', 'flag_keepalive', 'flag_deauth',
     'flag_assoc_fail', 'flag_conn_fail',
+    'flag_ps_cmd', 'flag_wlan_irq', 'flag_wifi_stuck', 'flag_wifi_off',
 ]
 
 
@@ -110,6 +111,8 @@ def build_segments(feature_rows: list[dict], labels: np.ndarray, cfg: dict = Non
         assoc_count = sum(r['flag_assoc_fail'] for r in rows)
         seg['deauth_to_assoc_ratio'] = deauth_count / max(assoc_count, 1)
         seg['max_delta_t_ms'] = float(max((r['delta_ms'] for r in rows), default=0))
+        rssi_vals = [r['rssi'] for r in rows if r['has_rssi']]
+        seg['max_rssi_drop'] = float(max(rssi_vals) - min(rssi_vals)) if len(rssi_vals) >= 2 else 0.0
 
         segments.append(seg)
 

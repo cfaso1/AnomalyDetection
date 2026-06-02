@@ -1,135 +1,166 @@
 # Wi-Fi Log Anomaly Detection
 
-Segment-based anomaly detection for Wi-Fi logs using Isolation Forest.
+Segment-based anomaly detection for Motorola Solutions Wi-Fi logs using Isolation Forest.
 
 ## Overview
 
-This pipeline processes Wi-Fi log files, segments them by behavioral patterns using DBSCAN clustering, and detects anomalies using an unsupervised Isolation Forest model. No ground truth labels are required.
+This pipeline parses PS-format Wi-Fi log files, segments them by behavioral patterns using DBSCAN clustering, and detects anomalies using an unsupervised Isolation Forest model. No ground truth labels are required for detection.
+
+## Log Format
+
+Only the **PS log system** format is supported:
+
+```
+[198.11028] [wlanChan] [NETWORKING] WifiChannel: setAssociateRequestOption succeeded
+[198.12776] [wlanChan] [SSPWIFI] nsi80211: setoption: type=28 len=3 seqnum=35
+```
+
+`[elapsed_seconds] [thread] [component] message`
+
+DCMP date-time format logs are not processed and will be silently skipped.
 
 ## Project Structure
 
 ```
 .
-├── config.json          # Configuration file
-├── run.py              # CLI entry point
+├── config.json          # Configuration parameters
+├── run.py               # CLI entry point
 ├── src/
-│   ├── parser.py       # Log parser with multi-format support
-│   ├── features.py     # Per-line feature extraction
-│   ├── segmenter.py    # DBSCAN clustering + segment aggregation
-│   ├── trainer.py      # Isolation Forest training
-│   └── detector.py     # Anomaly detection and reporting
-├── wifi_logs/          # Directory for log files
-├── model/              # Saved model artifacts (after training)
-└── outputs/            # Scan reports (after scanning)
+│   ├── parser.py        # PS-format log parser
+│   ├── features.py      # Per-line feature extraction
+│   ├── segmenter.py     # DBSCAN clustering + segment aggregation
+│   ├── trainer.py       # Isolation Forest training
+│   └── detector.py      # Anomaly scoring, reporting, and excerpts
+├── training_logs/       # Healthy baseline PS-format logs (for training)
+├── bad_logs/            # Known-bad PS-format logs (for scanning/validation)
+├── model/               # Saved model artifacts (generated after training)
+└── outputs/             # Reports and excerpts (generated after scanning)
+    ├── report.csv
+    └── excerpts/
 ```
 
 ## Installation
 
 ```bash
-# Create virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
 ```
 
-## Configuration
+## Workflow
 
-Edit `config.json` to adjust parameters:
+### 1. Train on healthy baseline logs
 
-- `dbscan_eps`, `dbscan_min_samples` — DBSCAN clustering parameters
-- `dbscan_downsample_threshold` — Memory threshold for downsampling (default: 10000)
-- `if_n_estimators` — Number of trees in Isolation Forest (default: 100)
-- `if_contamination` — Expected proportion of anomalies in the data (default: 0.05)
-- `anomaly_threshold` — Score threshold to flag a segment as anomalous (default: 0.7)
-- `noise_cluster_floor` — Minimum score applied to DBSCAN noise segments (default: 0.4)
-
-## Usage
-
-### Train Model
+Place clean, healthy PS-format logs in `training_logs/`, then run:
 
 ```bash
-python3 run.py train wifi_logs
+python3 run.py train training_logs/
 ```
 
-This will:
-1. Parse all log files in `wifi_logs/`
-2. Extract per-line features
-3. Cluster lines into segments using DBSCAN
-4. Train Isolation Forest on all segments
-5. Save artifacts to `model/`:
-   - `iso_forest.pkl`
-   - `scaler.pkl`
-   - `if_score_range.pkl`
-   - `training_data.csv`
+Saves to `model/`:
+- `iso_forest.pkl` — trained Isolation Forest
+- `scaler.pkl` — RobustScaler fitted to training segments
+- `if_score_range.pkl` — training-time score range for global normalization
+- `training_data.csv` — all training segments and features
 
-### Scan for Anomalies
+### 2. Scan for anomalies
 
 ```bash
-python3 run.py scan wifi_logs
+python3 run.py scan bad_logs/
 ```
 
-This will:
-1. Load trained model from `model/`
-2. Parse and segment each log file
-3. Score each segment with the Isolation Forest
-4. Write report to `outputs/report.csv`
+Outputs:
+- `outputs/report.csv` — per-file verdict and score summary
+- `outputs/excerpts/` — notable log lines for each anomalous segment
+
+## Configuration (`config.json`)
+
+| Parameter | Default | Description |
+|---|---|---|
+| `dbscan_eps` | 0.5 | DBSCAN neighbourhood radius |
+| `dbscan_min_samples` | 5 | Minimum cluster size |
+| `dbscan_downsample_threshold` | 10000 | Lines above this are downsampled before clustering |
+| `if_n_estimators` | 100 | Number of trees in the Isolation Forest |
+| `if_contamination` | 0.05 | Expected anomaly fraction in training data |
+| `anomaly_threshold` | 0.6 | Score above which a segment is flagged (0–1) |
+| `anomaly_segment_fraction` | 0.0 | Minimum fraction of segments that must be anomalous to flag a file (0.0 = any single anomalous segment flags the file) |
+| `noise_cluster_floor` | 0.4 | Minimum effective score applied to DBSCAN noise segments |
+| `excerpt_max_notable_lines` | 100 | Max notable lines written per excerpt file |
 
 ## Pipeline Details
 
 ### 1. Parser (`src/parser.py`)
-- Supports two Motorola Wi-Fi log formats
+- PS-format only: `[elapsed_s] [thread] [component] message`
 - Encoding fallback: UTF-8 → Latin-1 → CP1252
-- Streaming parser for memory efficiency
-- Extracts: timestamp, elapsed time, component, level, message
+- Extracts: `elapsed_ms`, `line_num`, `component`, `level`, `message`
+- Level parsed from message prefix: `Level5:`, `Level8:`, `Warning:`, `Error:`
 
 ### 2. Feature Extraction (`src/features.py`)
-- Extracts 17 numeric features per line:
-  - Timing: elapsed_ms, delta_ms
-  - RSSI: rssi, has_rssi, rssi_level
-  - Sequence: seq_num
-  - Flags: is_error, is_warning, is_ssplogger, log_format
-  - Event flags: rssi_update, bcn_snr_low, data_snr_low, defer_rx, keepalive, deauth, assoc_fail, conn_fail
+
+Extracts per-line features:
+
+| Feature | Description |
+|---|---|
+| `elapsed_ms` | Absolute time in session (ms) |
+| `delta_ms` | Time since previous line (ms); 0 for first line |
+| `rssi`, `has_rssi`, `rssi_level` | Signal strength and quality |
+| `level_num` | Numeric log severity (Level5=5 … Error=10) |
+| `is_error`, `is_warning` | Error/Warning flags |
+| `is_networking`, `is_sspwifi` | Component flags (NETWORKING vs SSPWIFI) |
+| `flag_rssi_update` | WIFI_STA_RSSI_UPDATE_IND_ID event |
+| `flag_bcn_snr_low` | Beacon SNR below threshold |
+| `flag_data_snr_low` | Data SNR below threshold |
+| `flag_defer_rx` | Deferred RX work event |
+| `flag_keepalive` | Keepalive message |
+| `flag_deauth` | Deauthentication event |
+| `flag_assoc_fail` | Association response failure |
+| `flag_conn_fail` | Connection failure |
+| `flag_ps_cmd` | Power save mode command |
+| `flag_wlan_irq` | Hardware interrupt event |
+| `flag_wifi_stuck` | WifiChannel stuck event |
+| `flag_wifi_off` | WiFi disable event |
 
 ### 3. Segmentation (`src/segmenter.py`)
-- DBSCAN clustering with ball_tree algorithm
-- Dynamic downsampling for large files (>10K lines)
-- Aggregates per-segment statistics:
+- DBSCAN clustering (`ball_tree` algorithm) groups lines by behavioral similarity
+- Files >10K lines are dynamically downsampled before clustering
+- Per-segment aggregated features:
   - Duration, line count, lines_per_sec
   - RSSI stats: mean, min, level
-  - Error/warning rates
-  - Event flag rates (time-normalized)
+  - Error/warning rates (time-normalized)
+  - All event flag rates (time-normalized)
+  - `deauth_to_assoc_ratio` — state machine jitter indicator
+  - `max_delta_t_ms` — longest silence gap (firmware freeze detection)
+  - `max_rssi_drop` — largest RSSI swing within segment
 
 ### 4. Training (`src/trainer.py`)
-- Isolation Forest trained on all segments (fully unsupervised)
-- Records training-time decision function range for consistent scoring
-- Saves model, scaler, and score range to disk
+- Isolation Forest trained fully unsupervised on all segments
+- Training-time `decision_function` range saved for global normalization
+- Scores during scan are normalized against training min/max — not per-batch
 
 ### 5. Detection (`src/detector.py`)
-- Loads trained model and score range
-- Scores each segment using training-time normalization for consistent cross-file comparison
-- Noise segments get a minimum floor score
-- File flagged as ANOMALOUS if any segment exceeds threshold
+- Segments scored using globally normalized anomaly score (0–1)
+- Noise (DBSCAN label -1) segments receive a minimum floor score
+- A file is ANOMALOUS if at least one non-noise segment exceeds `anomaly_threshold`
+- Excerpt files written for each anomalous segment showing:
+  - Elevated features vs training data percentiles
+  - Notable log lines (errors, warnings, known PS-format events)
 
 ## Testing
 
-Run test scripts to verify each module:
-
 ```bash
-python3 -m tests.test_parser      # Test parser on all files
-python3 -m tests.test_features    # Test feature extraction
-python3 -m tests.test_segmenter   # Test DBSCAN clustering
-python3 -m tests.test_trainer     # Test model training
-python3 -m tests.test_detector    # Test anomaly detection
+python3 -m tests.test_parser
+python3 -m tests.test_features
+python3 -m tests.test_segmenter
+python3 -m tests.test_trainer
+python3 -m tests.test_detector
 ```
 
 ## Notes
 
-- **No labels needed**: Isolation Forest is fully unsupervised — no knowledge of which files are anomalous is required
-- **Contamination**: Controls what fraction of data is expected to be anomalous; tune in `config.json` if results are too sensitive or not sensitive enough
-- **Memory**: Large files (>10K lines) are automatically downsampled before DBSCAN clustering
-- **Threshold**: Adjust `anomaly_threshold` in config to control sensitivity
+- **Training data quality matters**: The model learns "normal" from `training_logs/`. If bad logs are included in training, the model's sensitivity degrades. Use only confirmed healthy PS-format logs for training.
+- **Retrain after any feature change**: Changes to `features.py`, `segmenter.py`, or `_SEGMENT_FEATURE_COLS` require a full retrain.
+- **Threshold tuning**: Lower `anomaly_threshold` to increase sensitivity. The default 0.6 is conservative.
+- **Memory**: Large files are automatically downsampled before DBSCAN — controlled by `dbscan_downsample_threshold`.
 
 ## License
 
