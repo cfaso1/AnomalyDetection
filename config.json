@@ -1,0 +1,11 @@
+{
+    "dbscan_eps": 0.5,
+    "dbscan_min_samples": 5,
+    "dbscan_downsample_threshold": 10000,
+    "if_n_estimators": 100,
+    "if_contamination": 0.05,
+    "anomaly_threshold": 0.5,
+    "noise_cluster_floor": 0.4,
+    "model_dir": "model",
+    "output_dir": "outputs"
+}
