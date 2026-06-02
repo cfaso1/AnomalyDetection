@@ -90,6 +90,7 @@ def build_segments(feature_rows: list[dict], labels: np.ndarray, cfg: dict = Non
         seg = {
             'segment_id':       label,
             'is_noise':         int(label == -1),
+            'line_indices':     sorted(indices),
             'start_elapsed_ms': start_ms,
             'end_elapsed_ms':   end_ms,
             'duration_ms':      duration_ms,

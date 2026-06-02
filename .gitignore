@@ -41,5 +41,6 @@ Thumbs.db
 # Project-specific
 model/
 outputs/
+outputs/excerpts/
 *.pkl
 *.csv

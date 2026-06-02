@@ -72,3 +72,20 @@ def extract_features_from_file(filepath) -> list[dict]:
         prev_ms = entry['elapsed_ms']
         features.append(feat)
     return features
+
+
+def extract_features_and_entries(filepath) -> tuple:
+    """
+    Parse a log file and return (feature_rows, entries) as parallel lists.
+    feature_rows[i] and entries[i] correspond to the same log line.
+    entries[i] contains the raw parsed log dict (timestamp, component, level, message).
+    """
+    features = []
+    entries = []
+    prev_ms = 0
+    for entry in parse_file(filepath):
+        feat = extract_line_features(entry, prev_ms)
+        prev_ms = entry['elapsed_ms']
+        features.append(feat)
+        entries.append(entry)
+    return features, entries

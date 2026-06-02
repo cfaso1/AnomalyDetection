@@ -3,7 +3,7 @@ import argparse
 from pathlib import Path
 
 from src.trainer import train
-from src.detector import scan, write_report
+from src.detector import scan, write_report, write_excerpts
 
 
 def main():
@@ -35,8 +35,10 @@ def main():
         train(args.log_dir)
     elif args.command == 'scan':
         print('=== Scan Mode ===\n')
-        results = scan(args.log_dir)
+        results, file_data = scan(args.log_dir)
         write_report(results)
+        print('\nGenerating detailed outputs...')
+        write_excerpts(file_data)
 
 
 if __name__ == '__main__':
