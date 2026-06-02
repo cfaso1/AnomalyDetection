@@ -145,16 +145,6 @@ Extracts per-line features:
   - Elevated features vs training data percentiles
   - Notable log lines (errors, warnings, known PS-format events)
 
-## Testing
-
-```bash
-python3 -m tests.test_parser
-python3 -m tests.test_features
-python3 -m tests.test_segmenter
-python3 -m tests.test_trainer
-python3 -m tests.test_detector
-```
-
 ## Notes
 
 - **Training data quality matters**: The model learns "normal" from `training_logs/`. If bad logs are included in training, the model's sensitivity degrades. Use only confirmed healthy PS-format logs for training.
