@@ -1,10 +1,10 @@
 # Wi-Fi Log Anomaly Detection
 
-Segment-based anomaly detection for Wi-Fi logs using Random Forest and Isolation Forest.
+Segment-based anomaly detection for Wi-Fi logs using Isolation Forest.
 
 ## Overview
 
-This pipeline processes Wi-Fi log files, segments them by behavioral patterns using DBSCAN clustering, and detects anomalies using a hybrid Random Forest (supervised) + Isolation Forest (unsupervised) approach.
+This pipeline processes Wi-Fi log files, segments them by behavioral patterns using DBSCAN clustering, and detects anomalies using an unsupervised Isolation Forest model. No ground truth labels are required.
 
 ## Project Structure
 
@@ -16,8 +16,7 @@ This pipeline processes Wi-Fi log files, segments them by behavioral patterns us
 │   ├── parser.py       # Log parser with multi-format support
 │   ├── features.py     # Per-line feature extraction
 │   ├── segmenter.py    # DBSCAN clustering + segment aggregation
-│   ├── labeler.py      # Filename-based labeling
-│   ├── trainer.py      # Model training (RF + IF)
+│   ├── trainer.py      # Isolation Forest training
 │   └── detector.py     # Anomaly detection and reporting
 ├── wifi_logs/          # Directory for log files
 ├── model/              # Saved model artifacts (after training)
@@ -41,17 +40,14 @@ Edit `config.json` to adjust parameters:
 
 - `dbscan_eps`, `dbscan_min_samples` — DBSCAN clustering parameters
 - `dbscan_downsample_threshold` — Memory threshold for downsampling (default: 10000)
-- `rf_n_estimators`, `rf_max_depth`, `rf_min_samples_leaf` — Random Forest hyperparameters
-- `if_n_estimators`, `if_contamination` — Isolation Forest hyperparameters
-- `rf_weight`, `if_weight` — Score combination weights (default: 0.6/0.4)
-- `anomaly_threshold` — Threshold for anomaly flag (default: 0.5)
-- `noise_cluster_floor` — Minimum score for noise segments (default: 0.4)
-- `anomalous_filename_keywords` — Keywords for anomalous files
-- `normal_filename_keywords` — Keywords for normal files
+- `if_n_estimators` — Number of trees in Isolation Forest (default: 100)
+- `if_contamination` — Expected proportion of anomalies in the data (default: 0.05)
+- `anomaly_threshold` — Score threshold to flag a segment as anomalous (default: 0.7)
+- `noise_cluster_floor` — Minimum score applied to DBSCAN noise segments (default: 0.4)
 
 ## Usage
 
-### Train Models
+### Train Model
 
 ```bash
 python3 run.py train wifi_logs
@@ -61,12 +57,11 @@ This will:
 1. Parse all log files in `wifi_logs/`
 2. Extract per-line features
 3. Cluster lines into segments using DBSCAN
-4. Label segments based on filename keywords
-5. Train Random Forest (supervised) and Isolation Forest (unsupervised)
-6. Save artifacts to `model/`:
-   - `rf_classifier.pkl`
+4. Train Isolation Forest on all segments
+5. Save artifacts to `model/`:
    - `iso_forest.pkl`
    - `scaler.pkl`
+   - `if_score_range.pkl`
    - `training_data.csv`
 
 ### Scan for Anomalies
@@ -76,11 +71,10 @@ python3 run.py scan wifi_logs
 ```
 
 This will:
-1. Load trained models from `model/`
+1. Load trained model from `model/`
 2. Parse and segment each log file
-3. Score each segment with RF + IF
-4. Combine scores using configured weights
-5. Write report to `outputs/report.csv`
+3. Score each segment with the Isolation Forest
+4. Write report to `outputs/report.csv`
 
 ## Pipeline Details
 
@@ -107,22 +101,15 @@ This will:
   - Error/warning rates
   - Event flag rates (time-normalized)
 
-### 4. Labeling (`src/labeler.py`)
-- Labels segments based on filename keywords
-- Labels: 1 (anomalous), 0 (normal), -1 (unknown)
-- All segments from same file get same label
+### 4. Training (`src/trainer.py`)
+- Isolation Forest trained on all segments (fully unsupervised)
+- Records training-time decision function range for consistent scoring
+- Saves model, scaler, and score range to disk
 
-### 5. Training (`src/trainer.py`)
-- Random Forest: Supervised on labeled segments
-- Isolation Forest: Unsupervised on normal segments only
-- 80/20 train/test split with stratification
-- Saves models and training data
-
-### 6. Detection (`src/detector.py`)
-- Loads trained models
-- Scores each segment: RF probability + IF score
-- Combined score: `rf_weight * rf_score + if_weight * if_score`
-- Noise segments get minimum floor score
+### 5. Detection (`src/detector.py`)
+- Loads trained model and score range
+- Scores each segment using training-time normalization for consistent cross-file comparison
+- Noise segments get a minimum floor score
 - File flagged as ANOMALOUS if any segment exceeds threshold
 
 ## Testing
@@ -139,10 +126,10 @@ python3 -m tests.test_detector    # Test anomaly detection
 
 ## Notes
 
-- Memory: Large files (>10K lines) are automatically downsampled before DBSCAN clustering
-- Labels: Based on filename keywords — ensure your naming convention reflects ground truth
-- Threshold: Adjust `anomaly_threshold` in config if too many/false positives
-- Noise: Noise clusters (label -1) get a floor score but are not necessarily anomalous
+- **No labels needed**: Isolation Forest is fully unsupervised — no knowledge of which files are anomalous is required
+- **Contamination**: Controls what fraction of data is expected to be anomalous; tune in `config.json` if results are too sensitive or not sensitive enough
+- **Memory**: Large files (>10K lines) are automatically downsampled before DBSCAN clustering
+- **Threshold**: Adjust `anomaly_threshold` in config to control sensitivity
 
 ## License
 
