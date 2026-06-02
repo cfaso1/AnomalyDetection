@@ -106,6 +106,11 @@ def build_segments(feature_rows: list[dict], labels: np.ndarray, cfg: dict = Non
         for flag in _FLAG_COLS:
             seg[flag + '_rate'] = sum(r[flag] for r in rows) / duration_s
 
+        deauth_count = sum(r['flag_deauth'] for r in rows)
+        assoc_count = sum(r['flag_assoc_fail'] for r in rows)
+        seg['deauth_to_assoc_ratio'] = deauth_count / max(assoc_count, 1)
+        seg['max_delta_t_ms'] = float(max((r['delta_ms'] for r in rows), default=0))
+
         segments.append(seg)
 
     return segments

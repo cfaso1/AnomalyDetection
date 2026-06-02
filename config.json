@@ -4,7 +4,7 @@
     "dbscan_downsample_threshold": 10000,
     "if_n_estimators": 100,
     "if_contamination": 0.05,
-    "anomaly_threshold": 0.7,
+    "anomaly_threshold": 0.6,
     "anomaly_segment_fraction": 0.05,
     "noise_cluster_floor": 0.4,
     "model_dir": "model",

@@ -25,6 +25,7 @@ _SEGMENT_FEATURE_COLS = [
     'flag_rssi_update_rate', 'flag_bcn_snr_low_rate', 'flag_data_snr_low_rate',
     'flag_defer_rx_rate', 'flag_keepalive_rate',
     'flag_deauth_rate', 'flag_assoc_fail_rate', 'flag_conn_fail_rate',
+    'deauth_to_assoc_ratio', 'max_delta_t_ms',
 ]
 
 
@@ -187,11 +188,13 @@ def write_excerpts(file_data: list, cfg: dict = None):
 
     excerpts_dir = Path(cfg['output_dir']) / 'excerpts'
 
-    # Clear old per-file subdirectories
+    # Clear old excerpts (both subdirectories and flat .txt files)
     if excerpts_dir.exists():
         for item in excerpts_dir.iterdir():
             if item.is_dir():
                 shutil.rmtree(item)
+            elif item.suffix == '.txt':
+                item.unlink()
     excerpts_dir.mkdir(parents=True, exist_ok=True)
 
     training_path = Path(cfg['model_dir']) / 'training_data.csv'

@@ -18,7 +18,7 @@ _EVENT_PATTERNS = {
 }
 
 
-def extract_line_features(entry: dict, prev_elapsed_ms: int) -> dict:
+def extract_line_features(entry: dict, prev_elapsed_ms) -> dict:
     """
     Convert one parsed log entry into a numeric feature vector.
     Returns a flat dict of numeric values suitable for DBSCAN clustering.
@@ -45,9 +45,11 @@ def extract_line_features(entry: dict, prev_elapsed_ms: int) -> dict:
 
     flags = {k: int(pat.lower() in msg.lower()) for k, pat in _EVENT_PATTERNS.items()}
 
+    delta_ms = elapsed - prev_elapsed_ms if prev_elapsed_ms is not None else 0
+
     return {
         'elapsed_ms':      elapsed,
-        'delta_ms':        elapsed - prev_elapsed_ms,
+        'delta_ms':        delta_ms,
         'rssi':            rssi_val if rssi_val is not None else 0,
         'has_rssi':        int(rssi_val is not None),
         'rssi_level':      rssi_level,
@@ -66,7 +68,7 @@ def extract_features_from_file(filepath) -> list[dict]:
     Each dict also carries 'elapsed_ms' for downstream segment timing.
     """
     features = []
-    prev_ms = 0
+    prev_ms = None
     for entry in parse_file(filepath):
         feat = extract_line_features(entry, prev_ms)
         prev_ms = entry['elapsed_ms']
@@ -82,7 +84,7 @@ def extract_features_and_entries(filepath) -> tuple:
     """
     features = []
     entries = []
-    prev_ms = 0
+    prev_ms = None
     for entry in parse_file(filepath):
         feat = extract_line_features(entry, prev_ms)
         prev_ms = entry['elapsed_ms']
