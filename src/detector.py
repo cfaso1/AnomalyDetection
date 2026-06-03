@@ -7,7 +7,7 @@ from pathlib import Path
 import joblib
 
 from src.features import extract_features_and_entries
-from src.segmenter import segment_file
+from src.segmenter import segment_file, _FLAG_COLS
 
 _CONFIG_PATH = Path(__file__).parent.parent / 'config.json'
 
@@ -37,7 +37,7 @@ def _load_config() -> dict:
 
 
 def load_artifacts(cfg: dict = None) -> tuple:
-    """Load trained IF, scaler, and training score range from model_dir."""
+    """Load trained IF, scaler, score range, and optional classifier from model_dir."""
     if cfg is None:
         cfg = _load_config()
 
@@ -46,12 +46,19 @@ def load_artifacts(cfg: dict = None) -> tuple:
     scaler = joblib.load(model_dir / 'scaler.pkl')
     if_score_range = joblib.load(model_dir / 'if_score_range.pkl')
 
-    return iso, scaler, if_score_range
+    clf_path = model_dir / 'classifier.pkl'
+    classifier = joblib.load(clf_path) if clf_path.exists() else None
+    if classifier is not None:
+        print('  Using supervised classifier for scoring.')
+
+    return iso, scaler, if_score_range, classifier
 
 
-def score_segments(segments: list[dict], iso, scaler, if_score_range: dict, cfg: dict = None) -> list[dict]:
+def score_segments(segments: list[dict], iso, scaler, if_score_range: dict,
+                   cfg: dict = None, classifier=None) -> list[dict]:
     """
-    Score each segment with Isolation Forest using training-time score range for normalization.
+    Score each segment. Uses supervised classifier probability if available,
+    otherwise falls back to Isolation Forest score normalization.
     Returns segments with added score fields.
     """
     if cfg is None:
@@ -64,21 +71,105 @@ def score_segments(segments: list[dict], iso, scaler, if_score_range: dict, cfg:
     X = df[_SEGMENT_FEATURE_COLS].values.astype(float)
     X_scaled = scaler.transform(X)
 
-    if_raw = iso.decision_function(X_scaled)
-    score_min = if_score_range['min']
-    score_max = if_score_range['max']
-    if_score = 1.0 - (if_raw - score_min) / (score_max - score_min + 1e-9)
-    if_score = np.clip(if_score, 0.0, 1.0)
+    if classifier is not None:
+        scores = classifier.predict_proba(X_scaled)[:, 1]
+    else:
+        if_raw = iso.decision_function(X_scaled)
+        score_min = if_score_range['min']
+        score_max = if_score_range['max']
+        scores = 1.0 - (if_raw - score_min) / (score_max - score_min + 1e-9)
+        scores = np.clip(scores, 0.0, 1.0)
 
     threshold = cfg['anomaly_threshold']
-    noise_floor = cfg['noise_cluster_floor']
 
     for i, seg in enumerate(segments):
-        seg['anomaly_score'] = float(if_score[i])
-        effective_score = max(if_score[i], noise_floor) if seg['is_noise'] else if_score[i]
-        seg['is_anomalous'] = int(effective_score >= threshold)
+        seg['anomaly_score'] = float(scores[i])
+        seg['is_anomalous'] = int(scores[i] >= threshold)
 
     return segments
+
+
+def _aggregate_window(feature_rows: list[dict], start_idx: int, window_size: int) -> dict:
+    """Aggregate a window of feature rows into a segment-like dict for scoring."""
+    rows = feature_rows[start_idx:start_idx + window_size]
+    if not rows:
+        return None
+
+    elapsed_vals = [r['elapsed_ms'] for r in rows]
+    start_ms = min(elapsed_vals)
+    end_ms = max(elapsed_vals)
+    duration_ms = max(end_ms - start_ms, 1)
+    duration_s = duration_ms / 1000.0
+    n = len(rows)
+
+    window = {
+        'duration_ms': duration_ms,
+        'line_count': n,
+        'lines_per_sec': n / duration_s,
+        'mean_rssi': float(np.mean([r['rssi'] for r in rows])),
+        'min_rssi': float(np.min([r['rssi'] for r in rows])),
+        'mean_rssi_level': float(np.mean([r['rssi_level'] for r in rows])),
+        'error_rate': sum(r['is_error'] for r in rows) / duration_s,
+        'warning_rate': sum(r['is_warning'] for r in rows) / duration_s,
+    }
+
+    for flag in _FLAG_COLS:
+        window[flag + '_rate'] = sum(r[flag] for r in rows) / duration_s
+
+    deauth_count = sum(r['flag_deauth'] for r in rows)
+    assoc_count = sum(r['flag_assoc_fail'] for r in rows)
+    window['deauth_to_assoc_ratio'] = deauth_count / max(assoc_count, 1)
+    window['max_delta_t_ms'] = float(max((r['delta_ms'] for r in rows), default=0))
+    rssi_vals = [r['rssi'] for r in rows if r['has_rssi']]
+    window['max_rssi_drop'] = float(max(rssi_vals) - min(rssi_vals)) if len(rssi_vals) >= 2 else 0.0
+
+    window['start_idx'] = start_idx
+    window['end_idx'] = start_idx + n
+
+    return window
+
+
+def _find_peak_window(feature_rows: list[dict], iso, scaler, if_score_range: dict,
+                      cfg: dict = None, classifier=None) -> tuple:
+    """Slide a window across feature rows and find the most anomalous sub-window.
+    Returns (peak_window_dict, peak_score, peak_start_idx, peak_end_idx).
+    """
+    window_size = cfg.get('excerpt_window_size', 100)
+    n_rows = len(feature_rows)
+
+    if n_rows <= window_size:
+        return None, None, None, None
+
+    best_score = -1.0
+    best_window = None
+    best_start = 0
+    best_end = 0
+
+    for start_idx in range(0, n_rows - window_size + 1, window_size // 2):
+        window = _aggregate_window(feature_rows, start_idx, window_size)
+        if not window:
+            continue
+
+        window_df = pd.DataFrame([window])
+        X = window_df[_SEGMENT_FEATURE_COLS].values.astype(float)
+        X_scaled = scaler.transform(X)
+
+
+        if classifier is not None:
+            score = float(classifier.predict_proba(X_scaled)[:, 1][0])
+        else:
+            if_raw = iso.decision_function(X_scaled)
+            score_min = if_score_range['min']
+            score_max = if_score_range['max']
+            score = float(np.clip(1.0 - (if_raw - score_min) / (score_max - score_min + 1e-9), 0.0, 1.0)[0])
+
+        if score > best_score:
+            best_score = score
+            best_window = window
+            best_start = start_idx
+            best_end = window['end_idx']
+
+    return best_window, best_score, best_start, best_end
 
 
 def _format_elapsed(elapsed_ms: int) -> str:
@@ -90,7 +181,8 @@ def _format_elapsed(elapsed_ms: int) -> str:
     return f'{h:02d}:{m:02d}:{s:02d}.{ms:03d}'
 
 
-def score_file(fpath: Path, iso, scaler, if_score_range: dict, cfg: dict = None) -> tuple:
+def score_file(fpath: Path, iso, scaler, if_score_range: dict,
+               cfg: dict = None, classifier=None) -> tuple:
     """Full pipeline for a single file: parse -> segment -> score.
     Returns (scored_segments, raw_entries, feature_rows) as parallel structures.
     """
@@ -102,7 +194,7 @@ def score_file(fpath: Path, iso, scaler, if_score_range: dict, cfg: dict = None)
         return [], [], []
 
     segs = segment_file(feats, cfg)
-    scored = score_segments(segs, iso, scaler, if_score_range, cfg)
+    scored = score_segments(segs, iso, scaler, if_score_range, cfg, classifier=classifier)
     return scored, entries, feats
 
 
@@ -115,7 +207,7 @@ def scan(log_dir: Path, cfg: dict = None) -> tuple:
     if cfg is None:
         cfg = _load_config()
 
-    iso, scaler, if_score_range = load_artifacts(cfg)
+    iso, scaler, if_score_range, classifier = load_artifacts(cfg)
 
     log_files = list(Path(log_dir).glob('*.log'))
     log_files = [f for f in log_files if not f.name.endswith('.Zone.Identifier')]
@@ -124,17 +216,16 @@ def scan(log_dir: Path, cfg: dict = None) -> tuple:
     file_data = []
     for fpath in log_files:
         try:
-            scored, entries, feats = score_file(fpath, iso, scaler, if_score_range, cfg)
+            scored, entries, feats = score_file(fpath, iso, scaler, if_score_range, cfg, classifier=classifier)
             if not scored:
                 continue
 
             n_segs = len(scored)
             n_anomalous = sum(s['is_anomalous'] for s in scored)
-            n_anomalous_real = sum(s['is_anomalous'] for s in scored if not s['is_noise'])
             max_score = max(s['anomaly_score'] for s in scored)
             mean_score = float(np.mean([s['anomaly_score'] for s in scored]))
             min_fraction = cfg.get('anomaly_segment_fraction', 0.0)
-            verdict = 'ANOMALOUS' if n_anomalous_real > 0 and (n_anomalous / n_segs) >= min_fraction else 'normal'
+            verdict = 'ANOMALOUS' if n_anomalous > 0 and (n_anomalous / n_segs) >= min_fraction else 'normal'
 
             rows.append({
                 'file': fpath.name,
@@ -144,7 +235,7 @@ def scan(log_dir: Path, cfg: dict = None) -> tuple:
                 'mean_anomaly_score': round(mean_score, 4),
                 'verdict': verdict,
             })
-            file_data.append({'fpath': fpath, 'segments': scored, 'entries': entries, 'feats': feats})
+            file_data.append({'fpath': fpath, 'segments': scored, 'entries': entries, 'feats': feats, 'verdict': verdict})
 
             print(f'  {fpath.name}: {verdict} '
                   f'({n_anomalous}/{n_segs} segments, max_score={max_score:.3f})')
@@ -168,6 +259,9 @@ def write_report(results: pd.DataFrame, cfg: dict = None):
 
     print(f'\nReport saved to {report_path}')
     print(f'  Total files scanned:  {len(results)}')
+    if results.empty:
+        print('  No .log files found in the specified directory.')
+        return
     print(f'  Anomalous files:      {(results["verdict"] == "ANOMALOUS").sum()}')
     print(f'  Normal files:         {(results["verdict"] == "normal").sum()}')
 
@@ -184,6 +278,7 @@ def write_excerpts(file_data: list, cfg: dict = None):
     """
     Write outputs/excerpts/<filename>_seg<id>.txt for every anomalous segment.
     Only notable lines (errors, warnings, known events) are included.
+    For large segments, a sliding window finds the most anomalous sub-region.
     """
     if cfg is None:
         cfg = _load_config()
@@ -203,26 +298,48 @@ def write_excerpts(file_data: list, cfg: dict = None):
     training_df = pd.read_csv(training_path) if training_path.exists() else None
     max_lines = cfg.get('excerpt_max_notable_lines', 100)
 
+    iso, scaler, if_score_range, classifier = load_artifacts(cfg)
+
+    max_per_file = cfg.get('max_excerpts_per_file', 3)
+
     total = 0
     for fd in file_data:
         fname = fd['fpath'].name
         entries = fd['entries']
-        n_anomalous = sum(s['is_anomalous'] for s in fd['segments'])
+        feats = fd['feats']
 
-        for seg in fd['segments']:
-            if not seg['is_anomalous']:
-                continue
+        anomalous_segs = [s for s in fd['segments'] if s['is_anomalous']]
+        top_segs = sorted(anomalous_segs, key=lambda s: s['anomaly_score'], reverse=True)[:max_per_file]
+        n_anomalous = len(anomalous_segs)
+
+        for seg in top_segs:
 
             seg_id = seg['segment_id']
             line_indices = seg.get('line_indices', [])
-            seg_entries = [entries[i] for i in sorted(line_indices) if i < len(entries)]
+
+            # Find peak anomalous sub-window for large segments
+            peak_info = ''
+            seg_feats = [feats[i] for i in sorted(line_indices) if i < len(feats)]
+            peak_window, peak_score, peak_start, peak_end = _find_peak_window(seg_feats, iso, scaler, if_score_range, cfg, classifier=classifier)
+            if peak_window is not None:
+                # Convert window indices back to global file indices
+                global_peak_start = line_indices[peak_start] if peak_start < len(line_indices) else line_indices[0]
+                global_peak_end = line_indices[peak_end - 1] + 1 if peak_end <= len(line_indices) else line_indices[-1] + 1
+                excerpt_indices = list(range(global_peak_start, global_peak_end))
+                peak_info = f'\n--- Peak Anomalous Sub-Window ---\n'
+                peak_info += f'  Window lines: {global_peak_start} - {global_peak_end} ({global_peak_end - global_peak_start} lines)\n'
+                peak_info += f'  Window anomaly score: {peak_score:.4f}\n'
+            else:
+                # Fall back to full segment
+                excerpt_indices = line_indices
+
+            seg_entries = [entries[i] for i in sorted(excerpt_indices) if i < len(entries)]
 
             first_ln = seg_entries[0]['line_num'] if seg_entries else '?'
             last_ln = seg_entries[-1]['line_num'] if seg_entries else '?'
 
-            notable = [e for e in seg_entries if _is_notable(e)]
-            truncated = len(notable) > max_lines
-            notable = notable[:max_lines]
+            truncated = len(seg_entries) > max_lines
+            display_entries = seg_entries[:max_lines]
 
             elevated_summary = ''
             if training_df is not None:
@@ -264,19 +381,21 @@ def write_excerpts(file_data: list, cfg: dict = None):
                     f.write(f'\n--- Elevated Features (vs training data) ---\n')
                     f.write(elevated_summary + '\n')
 
-                f.write(f'\n--- Notable Lines (errors / warnings / events) ---\n\n')
+                if peak_info:
+                    f.write(peak_info)
 
-                if not notable:
-                    f.write('  [no notable lines — segment flagged for aggregate behavior]\n')
+                notable_in_window = [e for e in display_entries if _is_notable(e)]
+                f.write(f'--- Key Events in Window ({len(notable_in_window)} notable / {len(display_entries)} total lines) ---\n\n')
+
+                if not notable_in_window:
+                    f.write('  [no errors, warnings, or flagged events — anomaly is behavioral/aggregate]\n')
                 else:
-                    for e in notable:
+                    for e in notable_in_window[:15]:
                         ts = _format_elapsed(e['elapsed_ms'])
                         comp = e.get('component', '')
                         level = e.get('level', '')
                         msg = e.get('message', '')
                         f.write(f'[{ts}] [{comp}] [{level}] {msg}\n')
-                    if truncated:
-                        f.write(f'\n[... truncated at {max_lines} notable lines ...]\n')
 
             total += 1
 

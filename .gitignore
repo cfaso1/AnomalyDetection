@@ -38,6 +38,9 @@ ENV/
 Thumbs.db
 *.log
 
+# Credentials
+.env
+
 # Project-specific
 model/
 outputs/

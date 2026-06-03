@@ -3,11 +3,14 @@
     "dbscan_min_samples": 5,
     "dbscan_downsample_threshold": 10000,
     "if_n_estimators": 100,
-    "if_contamination": 0.05,
-    "anomaly_threshold": 0.6,
+    "if_contamination": 0.01,
+    "anomaly_threshold": 0.5,
     "anomaly_segment_fraction": 0.0,
-    "noise_cluster_floor": 0.4,
     "model_dir": "model",
     "output_dir": "outputs",
-    "excerpt_max_notable_lines": 100
+    "max_excerpts_per_file": 3,
+    "excerpt_max_notable_lines": 200,
+    "excerpt_window_size": 50,
+    "llm_enabled": false,
+    "llm_model": "VertexGemini"
 }
