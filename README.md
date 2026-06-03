@@ -1,10 +1,10 @@
 # Wi-Fi Log Anomaly Detection
 
-Segment-based anomaly detection for Motorola Solutions Wi-Fi logs using Isolation Forest.
+Segment-based anomaly detection for Motorola Solutions Wi-Fi logs. Supports both unsupervised (Isolation Forest) and supervised (Random Forest classifier) detection modes.
 
 ## Overview
 
-This pipeline parses PS-format Wi-Fi log files, segments them by behavioral patterns using DBSCAN clustering, and detects anomalies using an unsupervised Isolation Forest model. No ground truth labels are required for detection.
+This pipeline parses PS-format Wi-Fi log files, segments them by behavioral patterns using DBSCAN clustering, and scores each segment for anomalous behaviour. When known-bad logs are available, a supervised Random Forest classifier is trained on labeled examples for significantly higher accuracy. An optional LLM integration produces plain-English explanations for each anomalous file.
 
 ## Log Format
 
@@ -23,19 +23,26 @@ DCMP date-time format logs are not processed and will be silently skipped.
 
 ```
 .
-├── config.json          # Configuration parameters
-├── run.py               # CLI entry point
+├── config.json              # Configuration parameters
+├── run.py                   # CLI entry point
+├── .env                     # API credentials (not committed)
+├── .env.example             # Credential template
 ├── src/
-│   ├── parser.py        # PS-format log parser
-│   ├── features.py      # Per-line feature extraction
-│   ├── segmenter.py     # DBSCAN clustering + segment aggregation
-│   ├── trainer.py       # Isolation Forest training
-│   └── detector.py      # Anomaly scoring, reporting, and excerpts
-├── training_logs/       # Healthy baseline PS-format logs (for training)
-├── bad_logs/            # Known-bad PS-format logs (for scanning/validation)
-├── model/               # Saved model artifacts (generated after training)
-└── outputs/             # Reports and excerpts (generated after scanning)
+│   ├── parser.py            # PS-format log parser
+│   ├── features.py          # Per-line feature extraction
+│   ├── segmenter.py         # DBSCAN clustering + segment aggregation
+│   ├── trainer.py           # Isolation Forest + supervised classifier training
+│   ├── detector.py          # Anomaly scoring, reporting, and excerpts
+│   └── llm_reporter.py      # LLM-based anomaly explanation (optional)
+├── logs/
+│   ├── bad_logs/            # Known-anomalous PS-format logs (labeled training examples)
+│   ├── good_logs/           # Confirmed-healthy PS-format logs (for training)
+│   └── verification_logs/   # Held-out logs for testing model performance
+├── training_logs/           # Healthy baseline logs (legacy location, still supported)
+├── model/                   # Saved model artifacts (generated after training)
+└── outputs/                 # Reports and excerpts (generated after scanning)
     ├── report.csv
+    ├── llm_analysis.md
     └── excerpts/
 ```
 
@@ -47,45 +54,66 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Copy `.env.example` to `.env` and fill in credentials if using the LLM feature:
+
+```bash
+cp .env.example .env
+```
+
 ## Workflow
 
-### 1. Train on healthy baseline logs
+### Option A — Unsupervised (no labeled bad logs)
 
-Place clean, healthy PS-format logs in `training_logs/`, then run:
+Train on healthy logs only. The Isolation Forest learns the normal distribution and flags deviations from it.
 
 ```bash
 python3 run.py train training_logs/
 ```
 
-Saves to `model/`:
-- `iso_forest.pkl` — trained Isolation Forest
-- `scaler.pkl` — RobustScaler fitted to training segments
-- `if_score_range.pkl` — training-time score range for global normalization
-- `training_data.csv` — all training segments and features
+### Option B — Supervised (recommended when bad logs are available)
 
-### 2. Scan for anomalies
+Provide both a normal directory and a known-bad directory. A Random Forest classifier is trained on labeled segment examples alongside the Isolation Forest. The classifier is used for scoring at scan time when present.
 
 ```bash
-python3 run.py scan bad_logs/
+python3 run.py train logs/good_logs/ --anomaly-dir logs/bad_logs/
+```
+
+The supervised classifier directly learns the difference between normal and anomalous segment feature distributions, and is significantly more accurate than the unsupervised fallback when sufficient labeled examples exist.
+
+Saved to `model/`:
+- `iso_forest.pkl` — trained Isolation Forest (unsupervised fallback)
+- `scaler.pkl` — RobustScaler fitted to normal training segments
+- `if_score_range.pkl` — training-time decision function range
+- `training_data.csv` — all normal training segments and features
+- `classifier.pkl` — supervised Random Forest (only when `--anomaly-dir` is used)
+
+### Scan for anomalies
+
+```bash
+python3 run.py scan logs/verification_logs/
 ```
 
 Outputs:
 - `outputs/report.csv` — per-file verdict and score summary
-- `outputs/excerpts/` — notable log lines for each anomalous segment
+- `outputs/excerpts/` — top-N highest-scoring segments per anomalous file
+- `outputs/llm_analysis.md` — plain-English explanations (if `llm_enabled: true`)
 
 ## Configuration (`config.json`)
 
 | Parameter | Default | Description |
 |---|---|---|
-| `dbscan_eps` | 0.5 | DBSCAN neighbourhood radius |
-| `dbscan_min_samples` | 5 | Minimum cluster size |
-| `dbscan_downsample_threshold` | 10000 | Lines above this are downsampled before clustering |
-| `if_n_estimators` | 100 | Number of trees in the Isolation Forest |
-| `if_contamination` | 0.05 | Expected anomaly fraction in training data |
-| `anomaly_threshold` | 0.6 | Score above which a segment is flagged (0–1) |
-| `anomaly_segment_fraction` | 0.0 | Minimum fraction of segments that must be anomalous to flag a file (0.0 = any single anomalous segment flags the file) |
-| `noise_cluster_floor` | 0.4 | Minimum effective score applied to DBSCAN noise segments |
-| `excerpt_max_notable_lines` | 100 | Max notable lines written per excerpt file |
+| `dbscan_eps` | `0.5` | DBSCAN neighbourhood radius |
+| `dbscan_min_samples` | `5` | Minimum cluster size |
+| `dbscan_downsample_threshold` | `10000` | Lines above this are downsampled before clustering |
+| `if_n_estimators` | `100` | Number of trees in the Isolation Forest |
+| `if_contamination` | `0.01` | Expected anomaly fraction in training data (unsupervised mode only) |
+| `anomaly_threshold` | `0.5` | Score above which a segment is flagged. Use `0.5` for classifier probability; tune higher to reduce false positives |
+| `anomaly_segment_fraction` | `0.0` | Minimum fraction of segments that must be anomalous to flag a file (`0.0` = any single anomalous segment flags the file) |
+| `max_excerpts_per_file` | `3` | Maximum number of excerpt files written per anomalous log file (top N by score) |
+| `excerpt_max_notable_lines` | `200` | Max log lines written per excerpt file |
+| `excerpt_window_size` | `50` | Sliding window size (lines) for peak sub-segment pinpointing |
+| `llm_enabled` | `false` | Enable LLM anomaly explanation report |
+| `llm_model` | `"VertexGemini"` | Model name passed to the in-house GenAI API |
 
 ## Pipeline Details
 
@@ -133,23 +161,53 @@ Extracts per-line features:
   - `max_rssi_drop` — largest RSSI swing within segment
 
 ### 4. Training (`src/trainer.py`)
-- Isolation Forest trained fully unsupervised on all segments
-- Training-time `decision_function` range saved for global normalization
-- Scores during scan are normalized against training min/max — not per-batch
+
+**Unsupervised mode** (`train <normal_dir>`):
+- Isolation Forest fitted on normal segment features
+- `decision_function` range saved for score normalization at scan time
+
+**Supervised mode** (`train <normal_dir> --anomaly-dir <bad_dir>`):
+- Isolation Forest fitted on normal segments (unsupervised fallback)
+- Random Forest binary classifier fitted on labeled segments (normal=0, anomaly=1)
+- `class_weight='balanced'` handles the imbalance between few bad examples and many normal ones
+- Cross-validated F1 score printed during training as a quality indicator
 
 ### 5. Detection (`src/detector.py`)
-- Segments scored using globally normalized anomaly score (0–1)
-- Noise (DBSCAN label -1) segments receive a minimum floor score
-- A file is ANOMALOUS if at least one non-noise segment exceeds `anomaly_threshold`
-- Excerpt files written for each anomalous segment showing:
-  - Elevated features vs training data percentiles
-  - Notable log lines (errors, warnings, known PS-format events)
+- If `classifier.pkl` exists in `model/`, classifier probability is used as the anomaly score (0–1)
+- Otherwise, falls back to globally normalized Isolation Forest score
+- A file is `ANOMALOUS` if any segment exceeds `anomaly_threshold`
+- For each anomalous file, a sliding window scores sub-regions to pinpoint the peak anomalous window
+- Excerpt files written for the top `max_excerpts_per_file` segments (by score), showing the peak window's raw log lines
+
+### 6. LLM Reporter (`src/llm_reporter.py`)
+- Runs only when `llm_enabled: true` in `config.json`
+- Reads excerpt files for each `ANOMALOUS` file
+- Calls the in-house GenAI API (credentials from `.env`)
+- Writes `outputs/llm_analysis.md` with a 2–4 sentence technical explanation per file
+
+## LLM Setup
+
+Set credentials in `.env`:
+
+```
+API_KEY=your_api_key_here
+CORE_ID=your_core_id_here
+```
+
+Then enable in `config.json`:
+
+```json
+"llm_enabled": true,
+"llm_model": "VertexGemini"
+```
 
 ## Notes
 
-- **Training data quality matters**: The model learns "normal" from `training_logs/`. If bad logs are included in training, the model's sensitivity degrades. Use only confirmed healthy PS-format logs for training.
+- **Supervised vs unsupervised**: Use `--anomaly-dir` whenever you have confirmed bad examples — it directly learns the anomaly patterns rather than inferring them statistically.
+- **Overfitting**: The supervised classifier will score 1.0 on its own training files. Always evaluate against held-out logs in `logs/verification_logs/`.
+- **Threshold tuning**: With the classifier, `0.5` is the natural decision boundary. Raise it (e.g. `0.6`–`0.7`) to reduce false positives if needed.
 - **Retrain after any feature change**: Changes to `features.py`, `segmenter.py`, or `_SEGMENT_FEATURE_COLS` require a full retrain.
-- **Threshold tuning**: Lower `anomaly_threshold` to increase sensitivity. The default 0.6 is conservative.
+- **More bad examples = better generalisation**: Add more files to `logs/bad_logs/` and retrain to improve the classifier's ability to detect unseen anomaly types.
 - **Memory**: Large files are automatically downsampled before DBSCAN — controlled by `dbscan_downsample_threshold`.
 
 ## License
