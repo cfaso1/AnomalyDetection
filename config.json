@@ -11,6 +11,6 @@
     "max_excerpts_per_file": 3,
     "excerpt_max_notable_lines": 200,
     "excerpt_window_size": 50,
-    "llm_enabled": false,
+    "llm_enabled": true,
     "llm_model": "VertexGemini"
 }
