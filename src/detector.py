@@ -318,48 +318,35 @@ def write_excerpts(file_data: list, cfg: dict = None):
         for seg in top_segs:
 
             seg_id = seg['segment_id']
-            line_indices = seg.get('line_indices', [])
-
-            # Find peak anomalous sub-window for large segments
-            peak_info = ''
-            seg_feats = [feats[i] for i in sorted(line_indices) if i < len(feats)]
-            peak_window, peak_score, peak_start, peak_end = _find_peak_window(seg_feats, iso, scaler, if_score_range, cfg, classifier=classifier)
-            if peak_window is not None:
-                # Convert window indices back to global file indices
-                global_peak_start = line_indices[peak_start] if peak_start < len(line_indices) else line_indices[0]
-                global_peak_end = line_indices[peak_end - 1] + 1 if peak_end <= len(line_indices) else line_indices[-1] + 1
-                excerpt_indices = list(range(global_peak_start, global_peak_end))
-                peak_info = f'\n--- Peak Anomalous Sub-Window ---\n'
-                peak_info += f'  Window lines: {global_peak_start} - {global_peak_end} ({global_peak_end - global_peak_start} lines)\n'
-                peak_info += f'  Window anomaly score: {peak_score:.4f}\n'
-            else:
-                # Fall back to full segment
-                excerpt_indices = line_indices
-
-            seg_entries = [entries[i] for i in sorted(excerpt_indices) if i < len(entries)]
+            line_indices = sorted(seg.get('line_indices', []))
+            seg_entries = [entries[i] for i in line_indices if i < len(entries)]
+            seg_feats_list = [feats[i] for i in line_indices if i < len(feats)]
 
             first_ln = seg_entries[0]['line_num'] if seg_entries else '?'
             last_ln = seg_entries[-1]['line_num'] if seg_entries else '?'
 
-            truncated = len(seg_entries) > max_lines
-            display_entries = seg_entries[:max_lines]
-
-            elevated_summary = ''
+            # Build feature comparison table
+            elevated = []
             if training_df is not None:
-                elevated = []
                 for col in _SEGMENT_FEATURE_COLS:
                     val = float(seg.get(col, 0.0))
                     train_vals = training_df[col].values
                     pct = float(np.mean(train_vals <= val)) * 100
+                    median = float(np.median(train_vals))
                     nonzero_frac = float(np.mean(train_vals > 0))
                     if pct >= 80 and (val > 0 or nonzero_frac > 0.05):
-                        elevated.append((col, val, pct))
-                elevated.sort(key=lambda x: -x[2])
-                if elevated:
-                    elevated_summary = '\n'.join(
-                        f'  {c}: {v:.4f}  (top {100 - p:.0f}% of training)'
-                        for c, v, p in elevated
-                    )
+                        elevated.append((col, val, median, pct))
+                elevated.sort(key=lambda x: -x[3])
+
+            # Find the longest time gap within the segment
+            gap_lines = []
+            if seg_feats_list:
+                max_gap_idx = max(range(len(seg_feats_list)), key=lambda i: seg_feats_list[i].get('delta_ms', 0))
+                max_gap_ms = seg_feats_list[max_gap_idx].get('delta_ms', 0)
+                if max_gap_ms > 30000:
+                    before = seg_entries[max_gap_idx - 1] if max_gap_idx > 0 else None
+                    after = seg_entries[max_gap_idx] if max_gap_idx < len(seg_entries) else None
+                    gap_lines = (max_gap_ms, before, after)
 
             if n_anomalous > 1:
                 file_dir = excerpts_dir / fname
@@ -380,32 +367,38 @@ def write_excerpts(file_data: list, cfg: dict = None):
                         f' - {_format_elapsed(seg["end_elapsed_ms"])}\n')
                 f.write(f'Duration:     {seg["duration_ms"]} ms\n')
 
-                if elevated_summary:
-                    f.write(f'\n--- Elevated Features (vs training data) ---\n')
-                    f.write(elevated_summary + '\n')
+                if elevated:
+                    f.write(f'\n--- Why This Segment Is Anomalous ---\n')
+                    f.write(f'  {"Feature":<32} {"Segment":>10}  {"Train Median":>12}  Rank\n')
+                    f.write(f'  {"-"*32} {"-"*10}  {"-"*12}  ----\n')
+                    for col, val, med, pct in elevated:
+                        f.write(f'  {col:<32} {val:>10.4f}  {med:>12.4f}  top {100-pct:.0f}%\n')
 
-                if peak_info:
-                    f.write(peak_info)
+                if gap_lines:
+                    gap_ms, before, after = gap_lines
+                    mins, secs = divmod(gap_ms / 1000, 60)
+                    f.write(f'\n--- Longest Silence Gap: {int(mins)}m {secs:.1f}s ---\n')
+                    if before:
+                        ts = _format_elapsed(before['elapsed_ms'])
+                        f.write(f'  Last before: [{ts}] [{before.get("component","")}] {before.get("message","")}\n')
+                    if after:
+                        ts = _format_elapsed(after['elapsed_ms'])
+                        f.write(f'  First after: [{ts}] [{after.get("component","")}] {after.get("message","")}\n')
 
-                notable_in_window = [e for e in display_entries if _is_notable(e)]
-                f.write(f'--- Key Events in Window ({len(notable_in_window)} notable / {len(display_entries)} total lines) ---\n\n')
+                notable = [e for e in seg_entries if _is_notable(e)]
+                display_seg = seg_entries[:max_lines]
 
-                if not notable_in_window:
+                f.write(f'\n--- Key Events in Segment ({len(notable)} notable / {len(seg_entries)} total lines) ---\n\n')
+                if not notable:
                     f.write('  [no errors, warnings, or flagged events — anomaly is behavioral/aggregate]\n')
-                    f.write(f'\n--- Raw Log Lines ({len(display_entries)} lines) ---\n\n')
-                    for e in display_entries:
+                    f.write(f'\n--- Raw Log Lines ({len(display_seg)} of {len(seg_entries)}) ---\n\n')
+                    for e in display_seg:
                         ts = _format_elapsed(e['elapsed_ms'])
-                        comp = e.get('component', '')
-                        level = e.get('level', '')
-                        msg = e.get('message', '')
-                        f.write(f'[{ts}] [{comp}] [{level}] {msg}\n')
+                        f.write(f'[{ts}] [{e.get("component","")}] [{e.get("level","")}] {e.get("message","")}\n')
                 else:
-                    for e in notable_in_window:
+                    for e in notable:
                         ts = _format_elapsed(e['elapsed_ms'])
-                        comp = e.get('component', '')
-                        level = e.get('level', '')
-                        msg = e.get('message', '')
-                        f.write(f'[{ts}] [{comp}] [{level}] {msg}\n')
+                        f.write(f'[{ts}] [{e.get("component","")}] [{e.get("level","")}] {e.get("message","")}\n')
 
             total += 1
 

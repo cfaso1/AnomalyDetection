@@ -11,22 +11,44 @@ _CONFIG_PATH = Path(__file__).parent.parent / 'config.json'
 
 _BASE_URL = 'https://genai-service.stage.commandcentral.com/app-gateway/api/v2'
 
-_SYSTEM_PROMPT = (
-    'You are a Wi-Fi firmware diagnostic assistant. '
-    'You will receive structured anomaly reports from a log analysis tool. '
-    'Provide concise, technical explanations in plain English.'
-)
+_SYSTEM_PROMPT = """You are a Wi-Fi firmware diagnostic assistant analyzing PS-format logs from Motorola Solutions radios (APX, Mahalo).
+You will receive structured anomaly reports from a machine learning pipeline. Each report includes:
+- A "Why This Segment Is Anomalous" feature table comparing the segment's values to training-data medians.
+  "Rank: top N%" means the value is in the top N% most extreme seen — lower % = more anomalous.
+- A "Longest Silence Gap" section when the radio stopped logging for an extended period.
+- Notable log events (errors, warnings, deauthentications, SNR alerts) and raw log lines.
 
-_FILE_PROMPT = """The following anomalous segments were detected in Wi-Fi log file: {filename}
+Feature glossary:
+  max_delta_t_ms        Longest silence between consecutive log lines (ms). High = firmware stall or connectivity loss.
+  lines_per_sec         Logging rate. Very low = radio was nearly silent or frozen.
+  max_rssi_drop         Largest RSSI swing within the segment. High = signal instability.
+  deauth_to_assoc_ratio Ratio of disconnections to reconnection attempts. High = repeated connect/disconnect cycling.
+  flag_deauth_rate      Rate of deauthentication events. High = repeated disconnections.
+  flag_bcn_snr_low_rate Rate of low beacon SNR alerts. High = weak signal or RF interference on management frames.
+  flag_data_snr_low_rate Rate of low data SNR alerts. High = data transmission quality degradation.
+  flag_rssi_update_rate Rate of RSSI monitoring events. High = active signal instability being tracked.
+  flag_wifi_stuck_rate  Rate of WifiChannel stuck events. High = firmware hang or driver deadlock.
+  flag_wifi_off_rate    Rate of WiFi disable events.
+  flag_ps_cmd_rate      Rate of power-save mode commands.
+  flag_wlan_irq_rate    Rate of hardware interrupt events.
+  error_rate            Frequency of Error-level log lines per second.
+  warning_rate          Frequency of Warning-level log lines per second.
+
+Provide technical, actionable analysis. Reference specific feature names and what they indicate."""
+
+_FILE_PROMPT = """Wi-Fi log file: {filename}
+Anomalous segments: {n_anomalous} of {n_total} ({pct:.0f}% of file) | Max anomaly score: {max_score:.3f}
+
+Top anomalous segment(s) with feature evidence:
 
 {segments}
 
-In 2-4 sentences, explain:
-1. What the likely fault or issue is
-2. Which feature(s) are the strongest evidence
-3. What a developer should investigate
+Write a technical analysis (2-4 sentences) covering:
+1. The most likely fault or operational issue based on the feature evidence
+2. The 2-3 strongest indicators from the feature comparison table and what they mean for the radio
+3. What a firmware or RF developer should investigate to confirm and resolve the issue
 
-Be specific and technical. Do not repeat raw numbers verbatim."""
+Reference specific feature names. Do not repeat raw numbers verbatim."""
 
 
 def _load_config() -> dict:
@@ -130,7 +152,15 @@ def write_llm_report(file_data: list, cfg: dict = None):
             continue
 
         segments_block = '\n\n'.join(excerpt_texts)
-        prompt = _FILE_PROMPT.format(filename=fname, segments=segments_block)
+        pct = (n_anomalous / n_total * 100) if n_total > 0 else 0.0
+        prompt = _FILE_PROMPT.format(
+            filename=fname,
+            n_anomalous=n_anomalous,
+            n_total=n_total,
+            pct=pct,
+            max_score=max_score,
+            segments=segments_block,
+        )
 
         try:
             explanation = _query(api_key, core_id, model, prompt)
