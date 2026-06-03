@@ -18,8 +18,8 @@ except ImportError:
 from src.detector import load_artifacts, score_file, write_excerpts, _load_config
 from src.llm_reporter import write_llm_report
 
-_LOGO_PATH = Path(__file__).parent.parent / 'DAWGLOGO.png'
-_TRANS_PATH = Path(__file__).parent.parent / 'DAWGTRANS.png'
+_LOGO_PATH = Path(__file__).parent / 'DAWGLOGO.png'
+_TRANS_PATH = Path(__file__).parent / 'DAWGTRANS.png'
 
 
 def _set_window_icon(root: tk.Tk):
