@@ -17,7 +17,7 @@ _SEGMENT_FEATURE_COLS = [
     'mean_rssi', 'min_rssi', 'mean_rssi_level',
     'error_rate', 'warning_rate',
     'flag_rssi_update_rate', 'flag_bcn_snr_low_rate', 'flag_data_snr_low_rate',
-    'flag_defer_rx_rate', 'flag_keepalive_rate',
+    'flag_defer_rx_rate',
     'flag_deauth_rate', 'flag_assoc_fail_rate', 'flag_conn_fail_rate',
     'flag_ps_cmd_rate', 'flag_wlan_irq_rate', 'flag_wifi_stuck_rate', 'flag_wifi_off_rate',
     'deauth_to_assoc_ratio', 'max_delta_t_ms', 'max_rssi_drop',

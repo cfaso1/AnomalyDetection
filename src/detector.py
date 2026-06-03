@@ -24,7 +24,7 @@ _SEGMENT_FEATURE_COLS = [
     'mean_rssi', 'min_rssi', 'mean_rssi_level',
     'error_rate', 'warning_rate',
     'flag_rssi_update_rate', 'flag_bcn_snr_low_rate', 'flag_data_snr_low_rate',
-    'flag_defer_rx_rate', 'flag_keepalive_rate',
+    'flag_defer_rx_rate',
     'flag_deauth_rate', 'flag_assoc_fail_rate', 'flag_conn_fail_rate',
     'flag_ps_cmd_rate', 'flag_wlan_irq_rate', 'flag_wifi_stuck_rate', 'flag_wifi_off_rate',
     'deauth_to_assoc_ratio', 'max_delta_t_ms', 'max_rssi_drop',
@@ -304,6 +304,9 @@ def write_excerpts(file_data: list, cfg: dict = None):
 
     total = 0
     for fd in file_data:
+        if fd.get('verdict') != 'ANOMALOUS':
+            continue
+
         fname = fd['fpath'].name
         entries = fd['entries']
         feats = fd['feats']
@@ -355,7 +358,7 @@ def write_excerpts(file_data: list, cfg: dict = None):
                 if elevated:
                     elevated_summary = '\n'.join(
                         f'  {c}: {v:.4f}  (top {100 - p:.0f}% of training)'
-                        for c, v, p in elevated[:5]
+                        for c, v, p in elevated
                     )
 
             if n_anomalous > 1:
@@ -389,8 +392,15 @@ def write_excerpts(file_data: list, cfg: dict = None):
 
                 if not notable_in_window:
                     f.write('  [no errors, warnings, or flagged events — anomaly is behavioral/aggregate]\n')
+                    f.write(f'\n--- Raw Log Lines ({len(display_entries)} lines) ---\n\n')
+                    for e in display_entries:
+                        ts = _format_elapsed(e['elapsed_ms'])
+                        comp = e.get('component', '')
+                        level = e.get('level', '')
+                        msg = e.get('message', '')
+                        f.write(f'[{ts}] [{comp}] [{level}] {msg}\n')
                 else:
-                    for e in notable_in_window[:15]:
+                    for e in notable_in_window:
                         ts = _format_elapsed(e['elapsed_ms'])
                         comp = e.get('component', '')
                         level = e.get('level', '')

@@ -107,8 +107,8 @@ Outputs:
 | `dbscan_downsample_threshold` | `10000` | Lines above this are downsampled before clustering |
 | `if_n_estimators` | `100` | Number of trees in the Isolation Forest |
 | `if_contamination` | `0.01` | Expected anomaly fraction in training data (unsupervised mode only) |
-| `anomaly_threshold` | `0.5` | Score above which a segment is flagged. Use `0.5` for classifier probability; tune higher to reduce false positives |
-| `anomaly_segment_fraction` | `0.0` | Minimum fraction of segments that must be anomalous to flag a file (`0.0` = any single anomalous segment flags the file) |
+| `anomaly_threshold` | `0.8` | Score above which a segment is flagged. `0.5` is the natural classifier decision boundary; raise to reduce false positives |
+| `anomaly_segment_fraction` | `0.3` | Minimum fraction of a file's segments that must exceed `anomaly_threshold` to flag the file as `ANOMALOUS`. Raise to suppress isolated single-segment hits |
 | `max_excerpts_per_file` | `3` | Maximum number of excerpt files written per anomalous log file (top N by score) |
 | `excerpt_max_notable_lines` | `200` | Max log lines written per excerpt file |
 | `excerpt_window_size` | `50` | Sliding window size (lines) for peak sub-segment pinpointing |
@@ -139,7 +139,6 @@ Extracts per-line features:
 | `flag_bcn_snr_low` | Beacon SNR below threshold |
 | `flag_data_snr_low` | Data SNR below threshold |
 | `flag_defer_rx` | Deferred RX work event |
-| `flag_keepalive` | Keepalive message |
 | `flag_deauth` | Deauthentication event |
 | `flag_assoc_fail` | Association response failure |
 | `flag_conn_fail` | Connection failure |
@@ -175,9 +174,13 @@ Extracts per-line features:
 ### 5. Detection (`src/detector.py`)
 - If `classifier.pkl` exists in `model/`, classifier probability is used as the anomaly score (0–1)
 - Otherwise, falls back to globally normalized Isolation Forest score
-- A file is `ANOMALOUS` if any segment exceeds `anomaly_threshold`
-- For each anomalous file, a sliding window scores sub-regions to pinpoint the peak anomalous window
-- Excerpt files written for the top `max_excerpts_per_file` segments (by score), showing the peak window's raw log lines
+- A segment is flagged if its score exceeds `anomaly_threshold`
+- A file is `ANOMALOUS` only if the fraction of flagged segments meets `anomaly_segment_fraction` — this suppresses files with a single spurious hit
+- A sliding window scores sub-regions within each flagged segment to pinpoint the peak anomalous window
+- Excerpt files written **only for `ANOMALOUS` files**, top `max_excerpts_per_file` segments by score, showing:
+  - All features elevated above the 80th training percentile
+  - All notable log lines in the peak window (errors, warnings, known events)
+  - Full raw log lines when no notable events exist (behavioral/aggregate anomalies)
 
 ### 6. LLM Reporter (`src/llm_reporter.py`)
 - Runs only when `llm_enabled: true` in `config.json`
@@ -205,9 +208,10 @@ Then enable in `config.json`:
 
 - **Supervised vs unsupervised**: Use `--anomaly-dir` whenever you have confirmed bad examples — it directly learns the anomaly patterns rather than inferring them statistically.
 - **Overfitting**: The supervised classifier will score 1.0 on its own training files. Always evaluate against held-out logs in `logs/verification_logs/`.
-- **Threshold tuning**: With the classifier, `0.5` is the natural decision boundary. Raise it (e.g. `0.6`–`0.7`) to reduce false positives if needed.
+- **Two-level false positive control**: Use `anomaly_threshold` (per-segment score gate) and `anomaly_segment_fraction` (file-level fraction gate) together. A high score threshold plus a minimum segment fraction is effective at eliminating isolated noise hits while keeping true anomalies with many affected segments.
 - **Retrain after any feature change**: Changes to `features.py`, `segmenter.py`, or `_SEGMENT_FEATURE_COLS` require a full retrain.
 - **More bad examples = better generalisation**: Add more files to `logs/bad_logs/` and retrain to improve the classifier's ability to detect unseen anomaly types.
+- **Excluded features**: `flag_keepalive_rate` is extracted but excluded from the model because zero-keepalive is normal in low-activity/power-save states and caused false positives. If future logs show keepalive absence as a genuine fault signal, re-add it to `_SEGMENT_FEATURE_COLS` in both `trainer.py` and `detector.py` and retrain.
 - **Memory**: Large files are automatically downsampled before DBSCAN — controlled by `dbscan_downsample_threshold`.
 
 ## License
