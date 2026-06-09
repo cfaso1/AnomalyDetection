@@ -15,8 +15,10 @@ try:
 except ImportError:
     _HTML_RENDER = False
 
-from src.detector import load_artifacts, score_file, write_excerpts, _load_config
-from src.llm_reporter import write_llm_report
+from src.scanner import (
+    scan_file, file_verdict, write_report,
+    load_config, load_model_artifacts, parse_and_tag,
+)
 
 _LOGO_PATH = Path(__file__).parent / 'DAWGLOGO.png'
 _TRANS_PATH = Path(__file__).parent / 'DAWGTRANS.png'
@@ -107,15 +109,6 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 </html>"""
 
 
-def _compute_verdict(scored_segments: list, cfg: dict) -> str:
-    n_segs = len(scored_segments)
-    if n_segs == 0:
-        return 'normal'
-    n_anomalous = sum(s['is_anomalous'] for s in scored_segments)
-    min_fraction = cfg.get('anomaly_segment_fraction', 0.0)
-    return 'ANOMALOUS' if n_anomalous > 0 and (n_anomalous / n_segs) >= min_fraction else 'normal'
-
-
 def _md_to_html(text: str) -> str:
     return _md.markdown(text, extensions=['fenced_code', 'tables', 'nl2br'])
 
@@ -190,73 +183,112 @@ class AnomalyGUI:
 
     def _analyze(self, fpath: Path):
         try:
-            cfg = _load_config()
-            iso, scaler, if_score_range, classifier = load_artifacts(cfg)
-            scored, entries, feats = score_file(fpath, iso, scaler, if_score_range, cfg, classifier=classifier)
-
-            if not scored:
-                self.root.after(0, self._show_result, 'normal', '', [], fpath)
-                return
-
-            verdict = _compute_verdict(scored, cfg)
-            file_data = [{'fpath': fpath, 'segments': scored, 'entries': entries,
-                          'feats': feats, 'verdict': verdict}]
-
-            excerpt_texts = []
-            llm_text = ''
-
-            if verdict == 'ANOMALOUS':
-                write_excerpts(file_data, cfg)
-                write_llm_report(file_data, cfg)
-
-                output_dir = Path(cfg['output_dir'])
-                excerpts_dir = output_dir / 'excerpts'
-                fname = fpath.name
-                file_subdir = excerpts_dir / fname
-                if file_subdir.is_dir():
-                    for p in sorted(file_subdir.glob('seg*.txt')):
-                        excerpt_texts.append(p.read_text(encoding='utf-8'))
-                else:
-                    safe_name = fname.replace(' ', '_').replace('(', '').replace(')', '')
-                    for p in sorted(excerpts_dir.glob(f'{safe_name}_seg*.txt')):
-                        excerpt_texts.append(p.read_text(encoding='utf-8'))
-
-                llm_path = output_dir / 'llm_analysis.md'
-                if llm_path.exists():
-                    llm_text = llm_path.read_text(encoding='utf-8')
-
-            self.root.after(0, self._show_result, verdict, llm_text, excerpt_texts, fpath)
-
+            cfg = load_config()
+            model_dir = Path(cfg['model_dir'])
+            drain_tree, encoder = load_model_artifacts(model_dir)
+            parsed = (parse_and_tag(fpath, drain_tree, encoder)
+                      if drain_tree is not None else None)
+            findings = scan_file(
+                fpath,
+                model_dir=model_dir if drain_tree is not None else None,
+                parsed_entries=parsed,
+            )
+            verdict = file_verdict(findings)
+            # Persist a Markdown + JSON report alongside the GUI display.
+            try:
+                out_dir = Path(cfg.get('output_dir', 'outputs')) / 'findings'
+                # Clear previous outputs for this file
+                stem = fpath.stem
+                json_path = out_dir / 'json' / f'{stem}.findings.json'
+                md_path = out_dir / 'md' / f'{stem}.findings.md'
+                if json_path.exists():
+                    json_path.unlink()
+                if md_path.exists():
+                    md_path.unlink()
+                write_report(fpath, findings, out_dir)
+            except Exception:
+                pass
+            self.root.after(0, self._show_result, verdict, findings, fpath)
         except Exception as exc:
             self.root.after(0, self._show_error, str(exc))
 
-    def _show_result(self, verdict: str, llm_text: str, excerpt_texts: list, fpath: Path):
+    def _show_result(self, verdict: str, findings: list, fpath: Path):
         self.analyze_btn.config(state='normal')
 
-        parts = [f'<p class="fname">File: <strong>{html_lib.escape(fpath.name)}</strong></p>']
+        h = html_lib
+        parts = [f'<p class="fname">File: <strong>{h.escape(fpath.name)}</strong></p>']
         plain_parts = [f'File: {fpath.name}\n\n']
 
-        if verdict == 'normal':
-            self.status_var.set('Analysis complete: NORMAL')
-            parts.append('<p class="ok">&#10003; No anomalies detected.</p>')
-            plain_parts.append('No anomalies detected.\n')
-        else:
-            self.status_var.set('Analysis complete: ANOMALOUS')
-            parts.append('<p class="bad">&#9888; ANOMALOUS</p>')
-            plain_parts.append('ANOMALOUS\n\n')
+        verdict_class = 'ok' if verdict == 'NORMAL' else 'bad'
+        verdict_icon  = '&#10003;' if verdict == 'NORMAL' else '&#9888;'
+        self.status_var.set(f'Analysis complete: {verdict}')
+        parts.append(f'<p class="{verdict_class}">{verdict_icon} {verdict} '
+                     f'&nbsp;|&nbsp; {len(findings)} finding(s)</p>')
+        plain_parts.append(f'{verdict} | {len(findings)} finding(s)\n\n')
 
-            if llm_text:
-                parts.append('<p class="sec">LLM Analysis</p>')
-                parts.append(_md_to_html(llm_text))
-                plain_parts.append('--- LLM ANALYSIS ---\n' + llm_text + '\n\n')
+        if not findings:
+            parts.append('<p><em>No developer-actionable bugs detected.</em></p>')
+            plain_parts.append('No developer-actionable bugs detected.\n')
+            self._display('\n'.join(parts), plain=''.join(plain_parts))
+            return
 
-            if excerpt_texts:
-                parts.append('<p class="sec">Anomalous Segment Details</p>')
-                for txt in excerpt_texts:
-                    parts.append(f'<pre>{html_lib.escape(txt)}</pre>')
-                plain_parts.append('--- SEGMENT DETAILS ---\n' + '\n\n'.join(excerpt_texts))
+        # Severity summary banner.
+        from collections import Counter
+        sev_counts = Counter(f.severity for f in findings)
+        summary_bits = [f'<code>{s}</code>: {sev_counts[s]}'
+                        for s in ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW')
+                        if sev_counts.get(s)]
+        parts.append('<p>' + ' &nbsp; '.join(summary_bits) + '</p>')
+
+        for i, f in enumerate(findings, 1):
+            parts.append(self._format_finding_html(i, f))
+            plain_parts.append(self._format_finding_plain(i, f))
 
         self._display('\n'.join(parts), plain=''.join(plain_parts))
+
+    def _severity_color(self, sev: str) -> str:
+        return {
+            'CRITICAL': '#c53030',
+            'HIGH':     '#dd6b20',
+            'MEDIUM':   '#b7791f',
+            'LOW':      '#2c5282',
+        }.get(sev, '#444')
+
+    def _format_finding_html(self, i: int, f) -> str:
+        h = html_lib
+        color = self._severity_color(f.severity)
+        out = [
+            f'<h2>{i}. <span style="color:{color}">[{h.escape(f.severity)}]</span> '
+            f'{h.escape(f.description)}</h2>',
+            f'<p><strong>Category:</strong> {h.escape(f.category)} &nbsp;|&nbsp; '
+            f'<strong>Line:</strong> {f.line_number} &nbsp;|&nbsp; '
+            f'<strong>Timestamp:</strong> <code>{h.escape(f.timestamp)}</code> &nbsp;|&nbsp; '
+            f'<strong>Component:</strong> <code>{h.escape(f.component)}</code> &nbsp;|&nbsp; '
+            f'<strong>Actionability:</strong> {f.actionability_score:.2f}</p>',
+        ]
+        if f.burst_size > 1:
+            out.append(f'<p><strong>Burst size:</strong> {f.burst_size} matches</p>')
+        out.append('<p><strong>Trigger line:</strong></p>')
+        out.append(f'<pre>{h.escape(f.trigger_line)}</pre>')
+        if f.context_before or f.context_after:
+            ctx = ''
+            for b in f.context_before:
+                ctx += '  ' + h.escape(b) + '\n'
+            ctx += '&gt; ' + h.escape(f.trigger_line) + '\n'
+            for a in f.context_after:
+                ctx += '  ' + h.escape(a) + '\n'
+            out.append('<p><strong>Context:</strong></p>')
+            out.append(f'<pre>{ctx}</pre>')
+        out.append('<hr />')
+        return '\n'.join(out)
+
+    def _format_finding_plain(self, i: int, f) -> str:
+        lines = [
+            f'\n{i}. [{f.severity}] {f.description}',
+            f'   Category: {f.category} | Line {f.line_number} | TS {f.timestamp} | {f.component}',
+            f'   Trigger: {f.trigger_line}',
+        ]
+        return '\n'.join(lines) + '\n'
 
     def _show_error(self, msg: str):
         self.analyze_btn.config(state='normal')
